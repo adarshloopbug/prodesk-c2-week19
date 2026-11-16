@@ -188,6 +188,40 @@ export default function SimulateCollisionPanel({
           </div>
         </div>
       </div>
+
+      {/* Backend Connection Config (For Render / Railway / Custom WebSocket server) */}
+      <div className="mt-4 pt-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+        <div className="text-left">
+          <span className="font-bold text-slate-800">Deployment Architecture & Remote WebSocket Server:</span>
+          <p className="text-slate-500 text-[11px] mt-0.5">
+            On Vercel, peer-to-peer cross-tab sync is active automatically. To link to a hosted Node/Express backend:
+          </p>
+        </div>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <input
+            type="text"
+            placeholder="https://your-backend.onrender.com"
+            defaultValue={typeof window !== 'undefined' ? localStorage.getItem('rapiddispatch_backend_url') || '' : ''}
+            id="backend-url-input"
+            className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-800 placeholder-slate-400 w-full sm:w-64 focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              const val = document.getElementById('backend-url-input')?.value?.trim();
+              if (val) {
+                localStorage.setItem('rapiddispatch_backend_url', val);
+              } else {
+                localStorage.removeItem('rapiddispatch_backend_url');
+              }
+              window.location.reload();
+            }}
+            className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-xs font-semibold shrink-0 transition-colors shadow-sm"
+          >
+            Save & Connect
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

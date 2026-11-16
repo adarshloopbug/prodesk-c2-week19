@@ -20,6 +20,7 @@ export default function Navbar({
   agentName,
   onChangeAgent,
   isConnected,
+  isPeerMode,
   socketId,
   connectedAgents,
   onOpenNewTicket,
@@ -58,7 +59,7 @@ export default function Navbar({
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-rose-500'}`} />
               <span className={`text-xs font-semibold ${isConnected ? 'text-emerald-700' : 'text-rose-700'}`}>
-                {isConnected ? 'WebSocket Sync: Active' : 'Disconnected'}
+                {isConnected ? (isPeerMode ? 'Live Multi-Tab Sync: Active' : 'WebSocket Sync: Active') : 'Disconnected'}
               </span>
             </div>
 

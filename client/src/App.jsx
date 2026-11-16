@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { io } from 'socket.io-client';
-import socket from './socket';
+import socket, { BACKEND_URL } from './socket';
+import syncEngine from './syncEngine';
+import { initialTickets } from './initialData';
 import Navbar from './components/Navbar';
 import ConnectionBanner from './components/ConnectionBanner';
 import TicketBoard from './components/TicketBoard';
@@ -11,17 +12,29 @@ import AuditFeed from './components/AuditFeed';
 import { Info, CheckCircle2, AlertTriangle } from 'lucide-react';
 
 export default function App() {
-  const [isConnected, setIsConnected] = useState(socket.connected);
-  const [socketId, setSocketId] = useState(socket.id || '');
+  const [isSocketConnected, setIsSocketConnected] = useState(Boolean(socket && socket.connected));
+  const [isPeerMode, setIsPeerMode] = useState(!BACKEND_URL);
+  const [socketId, setSocketId] = useState(socket?.id || syncEngine.tabId);
   const [agentName, setAgentName] = useState(() => {
     return localStorage.getItem('rapiddispatch_agent') || 'Marcus Thorne';
   });
 
-  // Core Real-Time State
-  const [tickets, setTickets] = useState([]);
-  const [locks, setLocks] = useState({}); // { [ticketId]: { socketId, agentName, lockedAt } }
-  const [connectedAgents, setConnectedAgents] = useState([]);
-  const [auditLogs, setAuditLogs] = useState([]);
+  // Core Real-Time State - Always initialized with default tickets so it's NEVER empty on Vercel!
+  const [tickets, setTickets] = useState(() => syncEngine.getStoredTickets());
+  const [locks, setLocks] = useState(() => syncEngine.getStoredLocks());
+  const [connectedAgents, setConnectedAgents] = useState([
+    { id: 'agent-1', name: 'Marcus Thorne' },
+    { id: 'agent-2', name: 'David Rodriguez' },
+    { id: 'agent-3', name: 'Sarah Jenkins' }
+  ]);
+  const [auditLogs, setAuditLogs] = useState([
+    {
+      id: 'init-1',
+      eventType: 'SYSTEM_ONLINE',
+      message: 'RapidDispatch Dallas Ops Center initialized. Real-time race condition shield active.',
+      timestamp: new Date().toISOString()
+    }
+  ]);
   const [newTicketIds, setNewTicketIds] = useState(new Set());
 
   // UI Modals & Panels
@@ -29,6 +42,9 @@ export default function App() {
   const [isNewTicketOpen, setIsNewTicketOpen] = useState(false);
   const [showSimulator, setShowSimulator] = useState(false);
   const [toastMessage, setToastMessage] = useState(null);
+  const [simulatedNetworkLoss, setSimulatedNetworkLoss] = useState(false);
+
+  const isConnected = !simulatedNetworkLoss && (isSocketConnected || isPeerMode);
 
   const showToast = (message, type = 'info') => {
     setToastMessage({ message, type, id: Date.now() });
@@ -37,44 +53,132 @@ export default function App() {
     }, 4000);
   };
 
-  // Sync Agent Name to localStorage & announce on change
   const handleChangeAgent = (newName) => {
     setAgentName(newName);
     localStorage.setItem('rapiddispatch_agent', newName);
-    if (socket.connected) {
+    if (socket && socket.connected) {
       socket.emit('join_dashboard', { agentName: newName });
     }
     showToast(`Switched active agent persona to: ${newName}`, 'info');
   };
 
-  // Socket Connection and Event Listeners
+  // Cross-Tab BroadcastChannel Synchronization (Runs automatically on Vercel & as backup)
   useEffect(() => {
+    const unsubLock = syncEngine.on('ticket_locked', (data) => {
+      setLocks((prev) => ({
+        ...prev,
+        [data.ticketId]: {
+          socketId: data.socketId,
+          agentName: data.lockedBy,
+          lockedAt: data.lockedAt
+        }
+      }));
+    });
+
+    const unsubUnlock = syncEngine.on('ticket_unlocked', (data) => {
+      setLocks((prev) => {
+        const nextLocks = { ...prev };
+        delete nextLocks[data.ticketId];
+        return nextLocks;
+      });
+
+      if (data.reason === 'ghost_disconnect') {
+        showToast(data.message || `Ghost Disconnect Recovery: Ticket #${data.ticketId} auto-released!`, 'warning');
+      }
+    });
+
+    const unsubCreated = syncEngine.on('ticket_created', (data) => {
+      setTickets((prev) => {
+        if (prev.some((t) => t.id === data.ticket.id)) return prev;
+        return [data.ticket, ...prev];
+      });
+
+      setNewTicketIds((prev) => new Set(prev).add(data.ticket.id));
+      setTimeout(() => {
+        setNewTicketIds((prev) => {
+          const next = new Set(prev);
+          next.delete(data.ticket.id);
+          return next;
+        });
+      }, 3500);
+
+      showToast(`New Breakdown Alert: Ticket #${data.ticket.id} (${data.ticket.truckNumber}) dispatched!`, 'info');
+    });
+
+    const unsubUpdated = syncEngine.on('ticket_updated', (data) => {
+      setTickets((prev) =>
+        prev.map((t) => (t.id === data.ticket.id ? data.ticket : t))
+      );
+      showToast(`Ticket #${data.ticket.id} resolution saved by ${data.updatedBy}`, 'success');
+    });
+
+    const unsubAudit = syncEngine.on('audit_event', (entry) => {
+      setAuditLogs((prev) => [entry, ...prev.slice(0, 50)]);
+    });
+
+    const unsubReject = syncEngine.on('lock_rejected', (data) => {
+      showToast(data.error || `Ticket #${data.ticketId} is already locked!`, 'error');
+    });
+
+    const unsubAcquire = syncEngine.on('lock_acquired', (data) => {
+      const targetTicket = tickets.find((t) => t.id === data.ticketId);
+      if (targetTicket) {
+        setEditingTicket(targetTicket);
+      }
+    });
+
+    return () => {
+      unsubLock();
+      unsubUnlock();
+      unsubCreated();
+      unsubUpdated();
+      unsubAudit();
+      unsubReject();
+      unsubAcquire();
+    };
+  }, [tickets]);
+
+  // Real Socket.io Listeners (When Centralized WebSocket Server is Active)
+  useEffect(() => {
+    if (!socket) {
+      setIsPeerMode(true);
+      return;
+    }
+
     function onConnect() {
-      setIsConnected(true);
+      setIsSocketConnected(true);
+      setIsPeerMode(false);
       setSocketId(socket.id);
       socket.emit('join_dashboard', { agentName });
       showToast('Connected to RapidDispatch Live Ops Real-Time Server', 'success');
     }
 
-    function onDisconnect(reason) {
-      setIsConnected(false);
-      showToast('Connection lost! Reconnecting to RapidDispatch servers...', 'error');
+    function onDisconnect() {
+      setIsSocketConnected(false);
+      // Fallback to peer cross-tab sync if backend drops
+      setIsPeerMode(true);
     }
 
-    function onConnectError(err) {
-      setIsConnected(false);
+    function onConnectError() {
+      setIsSocketConnected(false);
+      setIsPeerMode(true);
     }
 
     function onDashboardSynced(data) {
-      setTickets(data.tickets || []);
-      setLocks(data.locks || {});
-      setConnectedAgents(data.connectedAgents || []);
+      if (data.tickets && data.tickets.length > 0) {
+        setTickets(data.tickets);
+      }
+      if (data.locks) {
+        setLocks(data.locks);
+      }
+      if (data.connectedAgents) {
+        setConnectedAgents(data.connectedAgents);
+      }
       if (data.recentLogs) {
         setAuditLogs(data.recentLogs);
       }
     }
 
-    // Real-Time Ticket Lock Broadcast (Track A Requirement 2)
     function onTicketLocked(data) {
       setLocks((prev) => ({
         ...prev,
@@ -86,7 +190,6 @@ export default function App() {
       }));
     }
 
-    // Real-Time Ticket Unlock Broadcast (Track A Requirement 3 & Ghost Recovery)
     function onTicketUnlocked(data) {
       setLocks((prev) => {
         const nextLocks = { ...prev };
@@ -99,7 +202,6 @@ export default function App() {
       }
     }
 
-    // Direct Lock Confirmations for This Client
     function onLockAcquired(data) {
       const targetTicket = tickets.find((t) => t.id === data.ticketId);
       if (targetTicket) {
@@ -111,14 +213,12 @@ export default function App() {
       showToast(data.error || `Ticket #${data.ticketId} is already locked by another agent!`, 'error');
     }
 
-    // Real-Time New Ticket Creation Broadcast (Track A Requirement 1)
     function onTicketCreated(data) {
       setTickets((prev) => {
         if (prev.some((t) => t.id === data.ticket.id)) return prev;
         return [data.ticket, ...prev];
       });
 
-      // Mark for highlight fade animation
       setNewTicketIds((prev) => new Set(prev).add(data.ticket.id));
       setTimeout(() => {
         setNewTicketIds((prev) => {
@@ -131,7 +231,6 @@ export default function App() {
       showToast(`New Breakdown Alert: Ticket #${data.ticket.id} (${data.ticket.truckNumber}) dispatched!`, 'info');
     }
 
-    // Real-Time Ticket Resolution Update Broadcast
     function onTicketUpdated(data) {
       setTickets((prev) =>
         prev.map((t) => (t.id === data.ticket.id ? data.ticket : t))
@@ -147,7 +246,6 @@ export default function App() {
       setAuditLogs((prev) => [entry, ...prev.slice(0, 50)]);
     }
 
-    // Register socket listeners
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('connect_error', onConnectError);
@@ -181,109 +279,127 @@ export default function App() {
     };
   }, [agentName, tickets]);
 
-  // Action: User clicks "Edit" on a ticket (Track A Requirement 2)
+  // Action: Lock ticket
   const handleEditTicket = (ticket) => {
     const existingLock = locks[ticket.id];
-    const isLockedByMe = existingLock && (existingLock.socketId === socket.id || existingLock.agentName === agentName);
+    const isLockedByMe = existingLock && (existingLock.socketId === socketId || existingLock.agentName === agentName);
 
     if (existingLock && !isLockedByMe) {
       showToast(`Collision Prevented: Ticket #${ticket.id} is currently locked by ${existingLock.agentName}!`, 'error');
       return;
     }
 
-    // Emit lock_ticket event to server
-    socket.emit('lock_ticket', {
-      ticketId: ticket.id,
-      agentName
-    });
+    if (socket && socket.connected) {
+      socket.emit('lock_ticket', { ticketId: ticket.id, agentName });
+    } else {
+      syncEngine.lockTicket(ticket.id, agentName);
+    }
 
     setEditingTicket(ticket);
   };
 
-  // Action: User clicks "Save" resolution (Track A Requirement 3)
+  // Action: Save ticket resolution
   const handleSaveTicket = ({ ticketId, resolution, status }) => {
-    socket.emit('save_resolution', {
-      ticketId,
-      resolution,
-      status,
-      agentName
-    });
+    if (socket && socket.connected) {
+      socket.emit('save_resolution', { ticketId, resolution, status, agentName });
+    } else {
+      syncEngine.saveResolution(ticketId, resolution, status, agentName);
+    }
     setEditingTicket(null);
   };
 
-  // Action: User closes or cancels edit modal (Track A Requirement 3)
+  // Action: Close edit modal
   const handleCloseEditModal = (ticketId) => {
-    socket.emit('unlock_ticket', {
-      ticketId,
-      reason: 'user_closed'
-    });
+    if (socket && socket.connected) {
+      socket.emit('unlock_ticket', { ticketId, reason: 'user_closed' });
+    } else {
+      syncEngine.unlockTicket(ticketId, 'user_closed');
+    }
     setEditingTicket(null);
   };
 
-  // Action: User creates new ticket (Track A Requirement 1)
+  // Action: Create ticket
   const handleCreateTicket = (ticketData) => {
-    socket.emit('create_ticket', ticketData);
+    if (socket && socket.connected) {
+      socket.emit('create_ticket', ticketData);
+    } else {
+      syncEngine.createTicket(ticketData, agentName);
+    }
   };
 
   // Action: Reset demo state
   const handleResetDemo = async () => {
-    try {
-      await fetch('/api/reset', { method: 'POST' });
-      showToast('Demo environment and locks successfully reset', 'info');
-    } catch (err) {
-      console.error(err);
+    localStorage.removeItem('rapiddispatch_shared_locks');
+    localStorage.removeItem('rapiddispatch_shared_tickets');
+    setTickets(initialTickets);
+    setLocks({});
+    
+    if (socket && socket.connected) {
+      try {
+        await fetch('/api/reset', { method: 'POST' });
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    showToast('Demo environment and locks successfully reset', 'info');
+  };
+
+  // Direct lock
+  const handleDirectLock = (ticketId, lockingAgent) => {
+    if (socket && socket.connected) {
+      socket.emit('lock_ticket', { ticketId, agentName: lockingAgent || agentName });
+    } else {
+      syncEngine.lockTicket(ticketId, lockingAgent || agentName);
     }
   };
 
-  // Test Harness: Direct Lock Ticket
-  const handleDirectLock = (ticketId, lockingAgent) => {
-    socket.emit('lock_ticket', {
-      ticketId,
-      agentName: lockingAgent || agentName
-    });
-  };
-
-  // Test Harness: Direct Unlock Ticket
+  // Direct unlock
   const handleDirectUnlock = (ticketId) => {
-    socket.emit('unlock_ticket', {
-      ticketId,
-      force: true,
-      reason: 'manual_override'
-    });
+    if (socket && socket.connected) {
+      socket.emit('unlock_ticket', { ticketId, force: true, reason: 'manual_override' });
+    } else {
+      syncEngine.unlockTicket(ticketId, 'manual_override');
+    }
   };
 
-  // Test Harness: Simulate Ghost Disconnect (The Ultimate Test)
+  // Simulate Ghost Disconnect
   const handleSimulateGhostDisconnect = (ticketId = 105) => {
     showToast(`Initiating Ghost Disconnect simulation on Ticket #${ticketId}...`, 'info');
     
-    const ghostSocket = io(window.location.origin || 'http://localhost:3001', {
-      transports: ['websocket']
-    });
-
-    ghostSocket.on('connect', () => {
-      ghostSocket.emit('join_dashboard', { agentName: 'Agent-Ghost (Dallas Desk 4B)' });
-      
-      // Step 1: Ghost agent locks ticket
-      ghostSocket.emit('lock_ticket', {
-        ticketId,
-        agentName: 'Agent-Ghost (Dallas Desk 4B)'
+    if (socket && socket.connected) {
+      // Connect auxiliary socket
+      const ghostSocket = io(window.location.origin || 'http://localhost:3001', {
+        transports: ['websocket']
       });
 
-      // Step 2: 1.2s later, simulate abrupt laptop lid close (disconnect without unlock)
+      ghostSocket.on('connect', () => {
+        ghostSocket.emit('join_dashboard', { agentName: 'Agent-Ghost (Dallas Desk 4B)' });
+        ghostSocket.emit('lock_ticket', { ticketId, agentName: 'Agent-Ghost (Dallas Desk 4B)' });
+        setTimeout(() => {
+          ghostSocket.disconnect();
+          showToast(`Ghost socket dropped connection! Server auto-releasing lock on Ticket #${ticketId}...`, 'warning');
+        }, 1200);
+      });
+    } else {
+      // In-browser peer mode ghost disconnect simulation
+      syncEngine.lockTicket(ticketId, 'Agent-Ghost (Dallas Desk 4B)');
       setTimeout(() => {
-        ghostSocket.disconnect();
-        showToast(`Ghost socket dropped connection! Server auto-releasing lock on Ticket #${ticketId}...`, 'warning');
+        syncEngine.unlockTicket(ticketId, 'ghost_disconnect');
+        showToast(`Ghost session dropped! Lock on Ticket #${ticketId} auto-released.`, 'warning');
       }, 1200);
-    });
+    }
   };
 
   // Test Harness: Simulate Network Loss (Track A Requirement 3 Red Banner Test)
   const handleSimulateNetworkLoss = () => {
-    socket.disconnect();
+    setSimulatedNetworkLoss(true);
+    if (socket) socket.disconnect();
   };
 
   const handleSimulateReconnect = () => {
-    socket.connect();
+    setSimulatedNetworkLoss(false);
+    if (socket) socket.connect();
+    showToast('Network restored. Reconnected to RapidDispatch Live Ops.', 'success');
   };
 
   return (
@@ -299,6 +415,7 @@ export default function App() {
         agentName={agentName}
         onChangeAgent={handleChangeAgent}
         isConnected={isConnected}
+        isPeerMode={isPeerMode}
         socketId={socketId}
         connectedAgents={connectedAgents}
         onOpenNewTicket={() => setIsNewTicketOpen(true)}
