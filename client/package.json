@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node -e \"const fs=require('fs'),p=require('path'); if (fs.existsSync(p.join('..','package.json'))) { try { fs.cpSync('dist', p.join('..','dist'), { recursive: true }); } catch(e){} }\"",
     "preview": "vite preview"
   },
   "dependencies": {
