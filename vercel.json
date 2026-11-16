@@ -1,6 +1,6 @@
 {
-  "outputDirectory": "client/dist",
-  "buildCommand": "cd client && npm install --include=optional && npm run build || echo 'Using verified prebuilt client/dist bundle'",
+  "outputDirectory": "dist",
+  "buildCommand": "node build.js",
   "rewrites": [
     {
       "source": "/(.*)",

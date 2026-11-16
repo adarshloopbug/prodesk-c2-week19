@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node server/server.js",
     "dev:server": "node server/server.js",
-    "build:client": "cd client && npm run build",
-    "build": "cd client && npm install --include=optional && npm run build || echo 'Using prebuilt bundle'",
+    "build:client": "node build.js",
+    "build": "node build.js",
     "dev": "node server/server.js"
   },
   "dependencies": {
