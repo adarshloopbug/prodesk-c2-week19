@@ -1,0 +1,19 @@
+{
+  "name": "rapiddispatch-liveops-helpdesk",
+  "version": "1.0.0",
+  "description": "RapidDispatch Freight & Logistics - Real-Time Collaborative Helpdesk",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev:server": "node server/server.js",
+    "build:client": "cd client && npm run build",
+    "build": "cd client && npm run build",
+    "dev": "node server/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.4"
+  }
+}
